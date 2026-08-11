@@ -1,0 +1,39 @@
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+</IfModule>
+
+RewriteCond %{HTTP_HOST} !^www\.
+RewriteRule ^(.*)$ https://www.%{HTTP_HOST}/$1 [R=301,L]
+
+RewriteCond %{HTTPS} off
+RewriteRule ^(.*)$ https://www.%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+<FilesMatch "\.(svg)$">
+    Header set Access-Control-Allow-Origin "https://www.hamiltontn911.gov"
+</FilesMatch>
+
+<filesMatch "\.(html|php|css|js)$">
+    Header set Cache-Control "no-cache, no-store, must-revalidate"
+</filesMatch>
+
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteRule ^([^\.]+)$ $1.php [NC,L]
+
+Redirect 301 /hc911 https://www.hamiltontn911.gov
+
+
+#Protect single file
+<Files users.php>
+AuthName "Dialog prompt"
+AuthType Basic
+AuthUserFile "/home/dh_hc911/hamiltontn911.gov/.htpasswd"
+Require valid-user
+</Files>
+
+ErrorDocument 401 https://www.hamiltontn911.gov/
+
+
+RedirectPermanent /specialneeds https://www.hamiltontn911.gov/special-needs-entry-request.php
+RedirectPermanent /special-needs-entry-request.php/ https://www.hamiltontn911.gov/special-needs-entry-request.php
+RedirectPermanent /board-meetings https://www.hamiltontn911.gov/board-meetings.php
+RedirectPermanent /jobfair https://www.hamiltontn911.gov/job-openings.php

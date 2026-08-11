@@ -1,0 +1,6 @@
+AuthType basic
+AuthName "Enter Access code"
+AuthUserFile "/home/dh_hc911/hamiltontn911.gov/secure/.htpasswd"
+require valid-user
+
+ErrorDocument 401 https://www.hamiltontn911.gov/

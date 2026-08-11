@@ -1,0 +1,5 @@
+Options -Indexes
+
+RewriteEngine On
+RewriteRule ^cache/ - [F,L]
+RewriteRule ^tmp/ - [F,L]

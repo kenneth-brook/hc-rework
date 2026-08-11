@@ -1,0 +1,5 @@
+<IfModule mod_rewrite.c>
+RewriteEngine On
+</IfModule>
+
+Redirect 301 / https://outlook.office365.com/owa/hc911.org/

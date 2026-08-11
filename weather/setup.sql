@@ -1,0 +1,14 @@
+CREATE TABLE IF NOT EXISTS weather_tile_cache (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  layer VARCHAR(32) NOT NULL,
+  z TINYINT UNSIGNED NOT NULL,
+  x INT UNSIGNED NOT NULL,
+  y INT UNSIGNED NOT NULL,
+  file_path VARCHAR(255) NOT NULL,
+  fetched_at DATETIME NOT NULL,
+  expires_at DATETIME NOT NULL,
+  upstream_status SMALLINT UNSIGNED DEFAULT NULL,
+  file_size INT UNSIGNED DEFAULT NULL,
+  UNIQUE KEY uniq_tile (layer, z, x, y),
+  KEY idx_expires (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
