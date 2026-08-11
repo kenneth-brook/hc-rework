@@ -44,6 +44,7 @@ $('.custom-select').each(function(){
         $listItems.removeClass(selectedClass);
         $(this).addClass(selectedClass);
         $list.hide();
+        $this.trigger('change');
     });
 
     $(document).click(function() {
