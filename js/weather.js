@@ -1,4 +1,4 @@
-console.log("weather.js build 2026-03-26-1");
+console.log("weather.js build 2026-08-11-mapbox");
 
 const ICON_BASE = "https://hc911.org/images/weathericos";
 const WINDY_URL = "https://embed.windy.com/embed.html?type=map&location=coordinates&metricRain=default&metricTemp=default&metricWind=default&zoom=10&overlay=wind&product=ecmwf&level=surface&lat=34.939&lon=-85.261";
@@ -7,7 +7,6 @@ let locateData = null;
 let locateLink = "";
 let forecastUrl = "";
 let cast = "";
-let countyPolygon = null;
 
 const weatherBarLock = document.getElementById("weathBar");
 const weatherBarWrap = document.createElement("div");
@@ -82,7 +81,6 @@ tempBlock.addEventListener("click", toggleForecastPanel);
 
 weatherBlock.addEventListener("click", () => {
     weatherLayerVisible = !weatherLayerVisible;
-    console.log("weather toggle clicked", weatherLayerVisible);
 
     if (weatherLayerVisible) {
         weatherBlock.classList.add("showLayer");
@@ -140,27 +138,9 @@ async function countyCordsGrab() {
 }
 
 function drawCountyOutline() {
-    if (!Array.isArray(countyCords) || countyCords.length === 0 || !window.map) {
-        return;
+    if (typeof window.drawCountyOutlineOnMap === "function") {
+        window.drawCountyOutlineOnMap();
     }
-
-    const outerRing = Array.isArray(countyCords[0]?.[0]?.[0]) ? countyCords[0][0] : countyCords[0];
-
-    if (!Array.isArray(outerRing)) {
-        return;
-    }
-
-    const latlngs = outerRing.map((pair) => [pair[1], pair[0]]);
-
-    if (countyPolygon) {
-        map.removeLayer(countyPolygon);
-    }
-
-    countyPolygon = L.polygon(latlngs, {
-        color: "red",
-        fill: false,
-        weight: 2
-    }).addTo(map);
 }
 
 async function countyWeatherGrab() {
@@ -304,13 +284,22 @@ async function displayFiveDayForecast() {
             const forecastElement = document.createElement("div");
             forecastElement.classList.add("forecast-day");
 
-            forecastElement.innerHTML = `
-                <h3 class="forecast-day-title">${dayForecast.date}</h3>
-                <p>High: ${dayForecast.highTemp}°${dayForecast.temperatureUnit}</p>
-                <p>Low: ${dayForecast.lowTemp !== "N/A" ? `${dayForecast.lowTemp}°${dayForecast.temperatureUnit}` : "N/A"}</p>
-                <p>Forecast: ${dayForecast.shortForecast}</p>
-            `;
+            const title = document.createElement("h3");
+            title.className = "forecast-day-title";
+            title.textContent = dayForecast.date;
 
+            const high = document.createElement("p");
+            high.textContent = `High: ${dayForecast.highTemp}°${dayForecast.temperatureUnit}`;
+
+            const low = document.createElement("p");
+            low.textContent = dayForecast.lowTemp !== "N/A"
+                ? `Low: ${dayForecast.lowTemp}°${dayForecast.temperatureUnit}`
+                : "Low: N/A";
+
+            const forecast = document.createElement("p");
+            forecast.textContent = `Forecast: ${dayForecast.shortForecast}`;
+
+            forecastElement.append(title, high, low, forecast);
             forecastContainer.appendChild(forecastElement);
         });
     } catch (error) {
@@ -323,27 +312,20 @@ function toggleForecastPanel() {
 
     if (isOpen) {
         forecastBlock.style.display = "none";
-
         topWrap.style.backgroundColor = "#FFF";
         tempNum.style.color = "#1599D2";
         forecastBlockP.innerText = "";
         tempImg.src = `${ICON_BASE}/sun.png`;
-
-        // restore rounded lower-left corner after close
         tempBlock.style.borderBottomLeftRadius = "15px";
         topWrap.style.borderBottomLeftRadius = "15px";
-
         return;
     }
 
     forecastBlock.style.display = "block";
-
     topWrap.style.backgroundColor = "#1599D2";
     tempNum.style.color = "#FFF";
     forecastBlockP.innerText = cast ? `Current Forecast: ${cast}` : "";
     tempImg.src = `${ICON_BASE}/sunwhite.png`;
-
-    // flatten lower-left corner while dropdown is open
     tempBlock.style.borderBottomLeftRadius = "0";
     topWrap.style.borderBottomLeftRadius = "0";
 
