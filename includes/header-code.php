@@ -8,3 +8,9 @@
 <script src='https://sdk.amazonaws.com/js/aws-sdk-2.1.34.min.js'></script>
 <script src="js/jquery.min.js" type="text/javascript"></script>
 
+<?php if (basename($_SERVER['PHP_SELF']) === 'active-incidents.php') : ?>
+<link href="https://api.mapbox.com/mapbox-gl-js/v3.25.0/mapbox-gl.css" rel="stylesheet" />
+<script src="https://api.mapbox.com/mapbox-gl-js/v3.25.0/mapbox-gl.js"></script>
+<script src="js/mapbox-config.js"></script>
+<?php endif; ?>
+
