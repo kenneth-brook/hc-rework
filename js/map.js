@@ -13,14 +13,12 @@ let weatherLayerVisible = false;
 const WEATHER_SCRIPT_URL = "js/weather.js";
 const WEATHER_FORGE_BASE = "https://911emergensee.com/weather";
 const CALLS_API_URL = "https://hc911server.com/api/calls";
-const RAINVIEWER_API_URL = "https://api.rainviewer.com/public/weather-maps.json";
 const timeoutInMilliseconds = 15 * 60 * 1000;
 
 const INCIDENT_SOURCE_ID = "active-incidents";
 const INCIDENT_CLUSTER_LAYER_ID = "incident-clusters";
 const INCIDENT_CLUSTER_COUNT_LAYER_ID = "incident-cluster-count";
 const INCIDENT_POINT_LAYER_ID = "incident-points";
-const INCIDENT_STATUS_LAYER_ID = "incident-status";
 const RADAR_SOURCE_ID = "weather-radar";
 const RADAR_LAYER_ID = "weather-radar";
 const EVAC_SOURCE_ID = "evacuation-routes";
@@ -28,13 +26,34 @@ const EVAC_LAYER_ID = "evacuation-routes";
 const COUNTY_SOURCE_ID = "hamilton-county-outline";
 const COUNTY_LAYER_ID = "hamilton-county-outline";
 
+const INCIDENT_ICON_PATHS = {
+    police: "images/pins/police",
+    fire: "images/pins/fire",
+    ems: "images/pins/ems",
+    roadclosure: "images/pins/roadclosure"
+};
+
+// Same NOAA ArcGIS base-reflectivity service used by wild-fire-map.
+// Mapbox substitutes each tile's Web Mercator bounding box into the request,
+// so the overlay remains usable at normal Mapbox zoom levels.
+const NOAA_RADAR_TILE_URL =
+    "https://mapservices.weather.noaa.gov/eventdriven/rest/services/radar/radar_base_reflectivity/MapServer/export" +
+    "?bbox={bbox-epsg-3857}" +
+    "&bboxSR=3857" +
+    "&imageSR=3857" +
+    "&size=256,256" +
+    "&format=png32" +
+    "&transparent=true" +
+    "&f=image";
+
 let timeoutId = null;
 let datapool = [];
 let datapoolSort = [];
 let weatherRefreshTimer = null;
-let weatherLoading = false;
 let evacVisible = false;
 let mapReady = false;
+let incidentSetupPromise = null;
+let incidentInteractionsBound = false;
 
 const dep = document.querySelector("#dtype");
 const age = document.querySelector("#data-agency");
@@ -64,13 +83,14 @@ if (map) {
     map.addControl(new mapboxgl.NavigationControl(), "top-right");
     map.addControl(new mapboxgl.FullscreenControl(), "top-right");
 
-    map.on("load", () => {
+    map.on("load", async () => {
         mapReady = true;
-        ensureIncidentLayers();
+
+        await ensureIncidentLayers();
         updateIncidentSource();
 
         if (weatherLayerVisible) {
-            void updateWeatherOverlay();
+            showWeatherOverlay();
         }
 
         if (evacVisible) {
@@ -81,51 +101,6 @@ if (map) {
             drawCountyOutlineOnMap();
         }
     });
-
-    map.on("click", INCIDENT_CLUSTER_LAYER_ID, async (event) => {
-        const feature = event.features?.[0];
-        if (!feature) return;
-
-        const clusterId = feature.properties?.cluster_id;
-        const source = map.getSource(INCIDENT_SOURCE_ID);
-        if (!source || clusterId == null) return;
-
-        try {
-            const zoom = await source.getClusterExpansionZoom(clusterId);
-            map.easeTo({ center: feature.geometry.coordinates, zoom });
-        } catch (error) {
-            console.error("Unable to expand incident cluster:", error);
-        }
-    });
-
-    map.on("click", INCIDENT_POINT_LAYER_ID, (event) => {
-        const feature = event.features?.[0];
-        if (!feature) return;
-
-        const coordinates = feature.geometry.coordinates.slice();
-        const properties = feature.properties ?? {};
-        const popup = document.createElement("div");
-
-        appendPopupLine(popup, properties.masterIncident, true);
-        appendPopupLine(popup, properties.created);
-        appendPopupLine(popup, properties.jurisdiction);
-        appendPopupLine(popup, properties.type);
-        appendPopupLine(popup, properties.location);
-
-        new mapboxgl.Popup({ offset: 18 })
-            .setLngLat(coordinates)
-            .setDOMContent(popup)
-            .addTo(map);
-    });
-
-    [INCIDENT_CLUSTER_LAYER_ID, INCIDENT_POINT_LAYER_ID].forEach((layerId) => {
-        map.on("mouseenter", layerId, () => {
-            map.getCanvas().style.cursor = "pointer";
-        });
-        map.on("mouseleave", layerId, () => {
-            map.getCanvas().style.cursor = "";
-        });
-    });
 }
 
 const weatherScript = document.createElement("script");
@@ -134,6 +109,7 @@ document.head.appendChild(weatherScript);
 
 function appendPopupLine(container, value, strong = false) {
     if (!value) return;
+
     const element = document.createElement(strong ? "strong" : "div");
     element.textContent = value;
     container.appendChild(element);
@@ -146,6 +122,7 @@ function startTimer() {
 
 function doInactive() {
     clearInterval(timer);
+
     const inactivePopup = document.getElementById("inactive-popup");
     if (inactivePopup) {
         inactivePopup.style.visibility = "visible";
@@ -156,6 +133,7 @@ function setupTimers() {
     ["mousemove", "mousedown", "keypress", "touchmove"].forEach((eventName) => {
         document.addEventListener(eventName, startTimer, { passive: true });
     });
+
     startTimer();
 }
 
@@ -261,7 +239,10 @@ function incidentFeatureCollection() {
             .map((item) => {
                 const lat = Number.parseFloat(item.latitude);
                 const lng = Number.parseFloat(item.longitude);
-                if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+
+                if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+                    return null;
+                }
 
                 return {
                     type: "Feature",
@@ -288,94 +269,237 @@ function incidentFeatureCollection() {
 }
 
 function ensureIncidentLayers() {
-    if (!map || !mapReady || map.getSource(INCIDENT_SOURCE_ID)) return;
+    if (!map || !mapReady) {
+        return Promise.resolve();
+    }
 
-    map.addSource(INCIDENT_SOURCE_ID, {
-        type: "geojson",
-        data: incidentFeatureCollection(),
-        cluster: true,
-        clusterMaxZoom: 14,
-        clusterRadius: 48
+    if (map.getSource(INCIDENT_SOURCE_ID) && map.getLayer(INCIDENT_POINT_LAYER_ID)) {
+        bindIncidentInteractions();
+        return Promise.resolve();
+    }
+
+    if (incidentSetupPromise) {
+        return incidentSetupPromise;
+    }
+
+    incidentSetupPromise = setupIncidentLayers()
+        .catch((error) => {
+            console.error("Unable to initialize incident map layers:", error);
+        })
+        .finally(() => {
+            incidentSetupPromise = null;
+        });
+
+    return incidentSetupPromise;
+}
+
+async function setupIncidentLayers() {
+    if (!map.getSource(INCIDENT_SOURCE_ID)) {
+        map.addSource(INCIDENT_SOURCE_ID, {
+            type: "geojson",
+            data: incidentFeatureCollection(),
+            cluster: true,
+            clusterMaxZoom: 14,
+            clusterRadius: 48
+        });
+    }
+
+    if (!map.getLayer(INCIDENT_CLUSTER_LAYER_ID)) {
+        map.addLayer({
+            id: INCIDENT_CLUSTER_LAYER_ID,
+            type: "circle",
+            source: INCIDENT_SOURCE_ID,
+            slot: "top",
+            filter: ["has", "point_count"],
+            paint: {
+                "circle-color": "#174f7a",
+                "circle-radius": [
+                    "step",
+                    ["get", "point_count"],
+                    18,
+                    10, 22,
+                    30, 27
+                ],
+                "circle-stroke-width": 2,
+                "circle-stroke-color": "#ffffff"
+            }
+        });
+    }
+
+    if (!map.getLayer(INCIDENT_CLUSTER_COUNT_LAYER_ID)) {
+        map.addLayer({
+            id: INCIDENT_CLUSTER_COUNT_LAYER_ID,
+            type: "symbol",
+            source: INCIDENT_SOURCE_ID,
+            slot: "top",
+            filter: ["has", "point_count"],
+            layout: {
+                "text-field": ["get", "point_count_abbreviated"],
+                "text-size": 12,
+                "text-allow-overlap": true
+            },
+            paint: {
+                "text-color": "#ffffff"
+            }
+        });
+    }
+
+    await loadIncidentIcons();
+
+    if (!map.getLayer(INCIDENT_POINT_LAYER_ID)) {
+        map.addLayer({
+            id: INCIDENT_POINT_LAYER_ID,
+            type: "symbol",
+            source: INCIDENT_SOURCE_ID,
+            slot: "top",
+            filter: ["!", ["has", "point_count"]],
+            layout: {
+                "icon-image": [
+                    "match",
+                    ["get", "department"],
+                    "fire", "incident-fire",
+                    "ems", "incident-ems",
+                    "roadclosure", "incident-roadclosure",
+                    "police", "incident-police",
+                    "incident-police"
+                ],
+                "icon-anchor": "bottom",
+                "icon-allow-overlap": true,
+                "icon-ignore-placement": true,
+                "text-field": ["get", "statusCode"],
+                "text-size": 10,
+                "text-anchor": "bottom",
+                "text-offset": [0, -4.0],
+                "text-allow-overlap": true,
+                "text-ignore-placement": true
+            },
+            paint: {
+                "text-color": "#17212b",
+                "text-halo-color": "#ffffff",
+                "text-halo-width": 1.5
+            }
+        });
+    }
+
+    bindIncidentInteractions();
+}
+
+async function loadIncidentIcons() {
+    await Promise.all(
+        Object.entries(INCIDENT_ICON_PATHS).map(([department, basePath]) =>
+            loadIncidentIcon(department, basePath)
+        )
+    );
+}
+
+async function loadIncidentIcon(department, basePath) {
+    const imageName = `incident-${department}`;
+
+    if (map.hasImage(imageName)) {
+        return;
+    }
+
+    try {
+        const retinaImage = await loadMapImage(`${basePath}@2x.png`);
+        if (!map.hasImage(imageName)) {
+            map.addImage(imageName, retinaImage, { pixelRatio: 2 });
+        }
+        return;
+    } catch (retinaError) {
+        console.warn(`Retina ${department} pin could not be loaded; trying standard pin.`, retinaError);
+    }
+
+    const standardImage = await loadMapImage(`${basePath}.png`);
+    if (!map.hasImage(imageName)) {
+        map.addImage(imageName, standardImage);
+    }
+}
+
+function loadMapImage(url) {
+    return new Promise((resolve, reject) => {
+        map.loadImage(url, (error, image) => {
+            if (error || !image) {
+                reject(error ?? new Error(`Image ${url} returned no data`));
+                return;
+            }
+
+            resolve(image);
+        });
     });
+}
 
-    map.addLayer({
-        id: INCIDENT_CLUSTER_LAYER_ID,
-        type: "circle",
-        source: INCIDENT_SOURCE_ID,
-        filter: ["has", "point_count"],
-        paint: {
-            "circle-color": "#174f7a",
-            "circle-radius": [
-                "step",
-                ["get", "point_count"],
-                18,
-                10, 22,
-                30, 27
-            ],
-            "circle-stroke-width": 2,
-            "circle-stroke-color": "#ffffff"
+function bindIncidentInteractions() {
+    if (!map || incidentInteractionsBound) {
+        return;
+    }
+
+    if (!map.getLayer(INCIDENT_CLUSTER_LAYER_ID) || !map.getLayer(INCIDENT_POINT_LAYER_ID)) {
+        return;
+    }
+
+    incidentInteractionsBound = true;
+
+    map.on("click", INCIDENT_CLUSTER_LAYER_ID, async (event) => {
+        const feature = event.features?.[0];
+        if (!feature) return;
+
+        const clusterId = feature.properties?.cluster_id;
+        const source = map.getSource(INCIDENT_SOURCE_ID);
+        if (!source || clusterId == null) return;
+
+        try {
+            const zoom = await source.getClusterExpansionZoom(clusterId);
+            map.easeTo({
+                center: feature.geometry.coordinates,
+                zoom
+            });
+        } catch (error) {
+            console.error("Unable to expand incident cluster:", error);
         }
     });
 
-    map.addLayer({
-        id: INCIDENT_CLUSTER_COUNT_LAYER_ID,
-        type: "symbol",
-        source: INCIDENT_SOURCE_ID,
-        filter: ["has", "point_count"],
-        layout: {
-            "text-field": ["get", "point_count_abbreviated"],
-            "text-size": 12
-        },
-        paint: {
-            "text-color": "#ffffff"
-        }
+    map.on("click", INCIDENT_POINT_LAYER_ID, (event) => {
+        const feature = event.features?.[0];
+        if (!feature) return;
+
+        const coordinates = feature.geometry.coordinates.slice();
+        const properties = feature.properties ?? {};
+        const popup = document.createElement("div");
+
+        appendPopupLine(popup, properties.masterIncident, true);
+        appendPopupLine(popup, properties.created);
+        appendPopupLine(popup, properties.jurisdiction);
+        appendPopupLine(popup, properties.type);
+        appendPopupLine(popup, properties.location);
+
+        new mapboxgl.Popup({
+            offset: [0, -34],
+            closeButton: true,
+            closeOnClick: true
+        })
+            .setLngLat(coordinates)
+            .setDOMContent(popup)
+            .addTo(map);
     });
 
-    map.addLayer({
-        id: INCIDENT_POINT_LAYER_ID,
-        type: "circle",
-        source: INCIDENT_SOURCE_ID,
-        filter: ["!", ["has", "point_count"]],
-        paint: {
-            "circle-radius": 9,
-            "circle-color": [
-                "match",
-                ["get", "department"],
-                "fire", "#d84343",
-                "ems", "#2f8f5b",
-                "roadclosure", "#d8841f",
-                "police", "#2877b5",
-                "#555555"
-            ],
-            "circle-stroke-width": 2,
-            "circle-stroke-color": "#ffffff"
-        }
-    });
+    [INCIDENT_CLUSTER_LAYER_ID, INCIDENT_POINT_LAYER_ID].forEach((layerId) => {
+        map.on("mouseenter", layerId, () => {
+            map.getCanvas().style.cursor = "pointer";
+        });
 
-    map.addLayer({
-        id: INCIDENT_STATUS_LAYER_ID,
-        type: "symbol",
-        source: INCIDENT_SOURCE_ID,
-        filter: ["!", ["has", "point_count"]],
-        layout: {
-            "text-field": ["get", "statusCode"],
-            "text-size": 10,
-            "text-offset": [0, -1.75],
-            "text-allow-overlap": true
-        },
-        paint: {
-            "text-color": "#17212b",
-            "text-halo-color": "#ffffff",
-            "text-halo-width": 1.5
-        }
+        map.on("mouseleave", layerId, () => {
+            map.getCanvas().style.cursor = "";
+        });
     });
 }
 
 function updateIncidentSource() {
     if (!map || !mapReady) return;
-    ensureIncidentLayers();
-    const source = map.getSource(INCIDENT_SOURCE_ID);
-    source?.setData(incidentFeatureCollection());
+
+    void ensureIncidentLayers().then(() => {
+        const source = map.getSource(INCIDENT_SOURCE_ID);
+        source?.setData(incidentFeatureCollection());
+    });
 }
 
 function renderCalls() {
@@ -395,11 +519,17 @@ function renderCalls() {
 
         const typeCell = createTextCell(item.agency_type, "col-type", true);
         typeCell.firstElementChild?.classList.add(department);
+
         const statCell = createTextCell(item.status, "col-status", true);
-        const incidentCell = createTextCell(`Incident # ${item.sequencenumber ?? ""}`, "col-incident", true);
+        const incidentCell = createTextCell(
+            `Incident # ${item.sequencenumber ?? ""}`,
+            "col-incident",
+            true
+        );
         const dateCell = createTextCell(newDate, "col-date");
         const jurCell = createTextCell(item.jurisdiction, "col-jur");
         const desCell = createTextCell(item.type, "col-des");
+
         const locCell = document.createElement("td");
         locCell.classList.add("col-loc", "locCell");
 
@@ -415,7 +545,17 @@ function renderCalls() {
 
         const areaCell = createTextCell(item.city, "col-area");
 
-        tr.append(typeCell, statCell, incidentCell, dateCell, jurCell, desCell, locCell, areaCell);
+        tr.append(
+            typeCell,
+            statCell,
+            incidentCell,
+            dateCell,
+            jurCell,
+            desCell,
+            locCell,
+            areaCell
+        );
+
         tr.classList.add("rowSplit", `status-code-${department}`);
         chart.appendChild(tr);
     });
@@ -424,9 +564,11 @@ function renderCalls() {
 function createTextCell(value, className, strong = false) {
     const cell = document.createElement("td");
     cell.classList.add(className);
+
     const content = document.createElement(strong ? "strong" : "span");
     content.textContent = value ?? "";
     cell.appendChild(content);
+
     return cell;
 }
 
@@ -435,6 +577,7 @@ function focusIncident(lng, lat) {
     window.scrollTo({ top: 0, behavior: "smooth" });
 
     if (!map) return;
+
     map.flyTo({
         center: [lng, lat],
         zoom: 16,
@@ -442,73 +585,77 @@ function focusIncident(lng, lat) {
     });
 }
 
-async function getLatestRadarTileUrl() {
-    const response = await fetch(RAINVIEWER_API_URL, { cache: "no-store" });
-    if (!response.ok) {
-        throw new Error(`RainViewer API returned ${response.status}`);
-    }
+function ensureWeatherOverlay() {
+    if (!map || !mapReady) return;
 
-    const data = await response.json();
-    const frames = data?.radar?.past ?? [];
-    const latestFrame = frames[frames.length - 1];
-
-    if (!data?.host || !latestFrame?.path) {
-        throw new Error("RainViewer returned no current radar frame");
-    }
-
-    return `${data.host}${latestFrame.path}/256/{z}/{x}/{y}/2/1_1.png`;
-}
-
-async function updateWeatherOverlay() {
-    if (!map || !mapReady || !weatherLayerVisible || weatherLoading) return;
-    weatherLoading = true;
-
-    try {
-        const tileUrl = await getLatestRadarTileUrl();
-        removeWeatherOverlay();
-
+    if (!map.getSource(RADAR_SOURCE_ID)) {
         map.addSource(RADAR_SOURCE_ID, {
             type: "raster",
-            tiles: [tileUrl],
+            tiles: [NOAA_RADAR_TILE_URL],
             tileSize: 256,
-            attribution: "Weather radar: RainViewer"
+            attribution: "NOAA / National Weather Service"
         });
+    }
 
+    if (!map.getLayer(RADAR_LAYER_ID)) {
         map.addLayer({
             id: RADAR_LAYER_ID,
             type: "raster",
             source: RADAR_SOURCE_ID,
             slot: "middle",
+            layout: {
+                visibility: weatherLayerVisible ? "visible" : "none"
+            },
             paint: {
-                "raster-opacity": 0.65,
-                "raster-fade-duration": 0
+                "raster-opacity": 0.78,
+                "raster-fade-duration": 300
             }
         });
-    } catch (error) {
-        console.error("Radar overlay failed:", error);
-    } finally {
-        weatherLoading = false;
     }
 }
 
-function removeWeatherOverlay() {
-    if (!map) return;
-    if (map.getLayer(RADAR_LAYER_ID)) map.removeLayer(RADAR_LAYER_ID);
-    if (map.getSource(RADAR_SOURCE_ID)) map.removeSource(RADAR_SOURCE_ID);
+function showWeatherOverlay() {
+    if (!map || !mapReady) return;
+
+    ensureWeatherOverlay();
+
+    if (map.getLayer(RADAR_LAYER_ID)) {
+        map.setLayoutProperty(RADAR_LAYER_ID, "visibility", "visible");
+    }
+}
+
+function hideWeatherOverlay() {
+    if (!map || !mapReady) return;
+
+    if (map.getLayer(RADAR_LAYER_ID)) {
+        map.setLayoutProperty(RADAR_LAYER_ID, "visibility", "none");
+    }
 }
 
 function updateWeatherLayer() {
     if (weatherLayerVisible) {
-        void updateWeatherOverlay();
+        showWeatherOverlay();
     } else {
-        removeWeatherOverlay();
+        hideWeatherOverlay();
     }
 }
 
 function scheduleWeatherRefresh() {
     clearTimeout(weatherRefreshTimer);
-    weatherRefreshTimer = setTimeout(() => {
-        if (weatherLayerVisible) void updateWeatherOverlay();
+
+    weatherRefreshTimer = window.setTimeout(() => {
+        if (!weatherLayerVisible || !map || !mapReady) return;
+
+        // Recreate the dynamic NOAA source to force fresh radar imagery rather
+        // than reusing an older tile from Mapbox's in-memory raster cache.
+        if (map.getLayer(RADAR_LAYER_ID)) {
+            map.removeLayer(RADAR_LAYER_ID);
+        }
+        if (map.getSource(RADAR_SOURCE_ID)) {
+            map.removeSource(RADAR_SOURCE_ID);
+        }
+
+        showWeatherOverlay();
     }, 500);
 }
 
@@ -530,16 +677,26 @@ async function showEvacLayer() {
 
     try {
         const response = await fetch("./json/routs2.geojson", { cache: "no-store" });
-        if (!response.ok) throw new Error(`Evacuation routes returned ${response.status}`);
+        if (!response.ok) {
+            throw new Error(`Evacuation routes returned ${response.status}`);
+        }
+
         const data = await response.json();
 
         if (map.getSource(EVAC_SOURCE_ID)) {
             map.getSource(EVAC_SOURCE_ID).setData(data);
-            if (map.getLayer(EVAC_LAYER_ID)) map.setLayoutProperty(EVAC_LAYER_ID, "visibility", "visible");
+
+            if (map.getLayer(EVAC_LAYER_ID)) {
+                map.setLayoutProperty(EVAC_LAYER_ID, "visibility", "visible");
+            }
             return;
         }
 
-        map.addSource(EVAC_SOURCE_ID, { type: "geojson", data });
+        map.addSource(EVAC_SOURCE_ID, {
+            type: "geojson",
+            data
+        });
+
         map.addLayer({
             id: EVAC_LAYER_ID,
             type: "line",
@@ -558,13 +715,21 @@ async function showEvacLayer() {
 
 function hideEvacLayer() {
     if (!map || !mapReady) return;
+
     if (map.getLayer(EVAC_LAYER_ID)) {
         map.setLayoutProperty(EVAC_LAYER_ID, "visibility", "none");
     }
 }
 
 function drawCountyOutlineOnMap() {
-    if (!map || !mapReady || !Array.isArray(countyCords) || countyCords.length === 0) return;
+    if (
+        !map ||
+        !mapReady ||
+        !Array.isArray(countyCords) ||
+        countyCords.length === 0
+    ) {
+        return;
+    }
 
     const geometry = {
         type: Array.isArray(countyCords[0]?.[0]?.[0]) ? "MultiPolygon" : "Polygon",
@@ -582,7 +747,11 @@ function drawCountyOutlineOnMap() {
         return;
     }
 
-    map.addSource(COUNTY_SOURCE_ID, { type: "geojson", data });
+    map.addSource(COUNTY_SOURCE_ID, {
+        type: "geojson",
+        data
+    });
+
     map.addLayer({
         id: COUNTY_LAYER_ID,
         type: "line",
@@ -597,7 +766,10 @@ function drawCountyOutlineOnMap() {
 
 function clearMap() {
     map?.resize();
-    if (weatherLayerVisible) scheduleWeatherRefresh();
+
+    if (weatherLayerVisible) {
+        scheduleWeatherRefresh();
+    }
 }
 
 function mapToggle() {
@@ -609,7 +781,9 @@ function mapToggle() {
 
     window.setTimeout(() => map?.resize(), 250);
 
-    if (typeof textSwap === "function") textSwap();
+    if (typeof textSwap === "function") {
+        textSwap();
+    }
 }
 
 function mapOpen() {
@@ -621,7 +795,9 @@ function mapOpen() {
 
     window.setTimeout(() => map?.resize(), 250);
 
-    if (typeof textOpen === "function") textOpen();
+    if (typeof textOpen === "function") {
+        textOpen();
+    }
 }
 
 function startMap() {
