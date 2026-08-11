@@ -12,5 +12,6 @@
 <link href="https://api.mapbox.com/mapbox-gl-js/v3.25.0/mapbox-gl.css" rel="stylesheet" />
 <script src="https://api.mapbox.com/mapbox-gl-js/v3.25.0/mapbox-gl.js"></script>
 <script src="js/mapbox-config.js"></script>
+<script src="js/mapbox-interactions.js" defer></script>
 <?php endif; ?>
 
