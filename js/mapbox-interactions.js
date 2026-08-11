@@ -2,7 +2,14 @@
     const POINT_LAYER = "incident-points";
     const CLUSTER_LAYER = "incident-clusters";
     const SOURCE_ID = "active-incidents";
-    const HIT_RADIUS = 8;
+
+    // The original Leaflet pins rendered at 30x38 with the geographic point
+    // anchored at the bottom center. Match that visible footprint here instead
+    // of relying on Mapbox symbol collision boxes for hit testing.
+    const PIN_HALF_WIDTH = 16;
+    const PIN_HEIGHT = 40;
+    const PIN_BOTTOM_PADDING = 4;
+    const CLUSTER_RADIUS = 28;
 
     let installed = false;
 
@@ -14,19 +21,78 @@
         return [POINT_LAYER, CLUSTER_LAYER].filter((layerId) => map.getLayer(layerId));
     }
 
-    function hitTest(map, point) {
+    function getVisibleInteractiveFeatures(map) {
         const layers = getQueryableLayers(map);
 
         if (!layers.length) {
             return [];
         }
 
-        const box = [
-            [point.x - HIT_RADIUS, point.y - HIT_RADIUS],
-            [point.x + HIT_RADIUS, point.y + HIT_RADIUS]
-        ];
+        return map.queryRenderedFeatures(undefined, { layers });
+    }
 
-        return map.queryRenderedFeatures(box, { layers });
+    function distanceSquared(a, b) {
+        const dx = a.x - b.x;
+        const dy = a.y - b.y;
+        return (dx * dx) + (dy * dy);
+    }
+
+    function pointContainsPin(cursor, anchor) {
+        const dx = cursor.x - anchor.x;
+        const dy = cursor.y - anchor.y;
+
+        return (
+            Math.abs(dx) <= PIN_HALF_WIDTH &&
+            dy >= -PIN_HEIGHT &&
+            dy <= PIN_BOTTOM_PADDING
+        );
+    }
+
+    function pointContainsCluster(cursor, anchor) {
+        return distanceSquared(cursor, anchor) <= (CLUSTER_RADIUS * CLUSTER_RADIUS);
+    }
+
+    function hitTest(map, cursor) {
+        const features = getVisibleInteractiveFeatures(map);
+        const matches = [];
+
+        features.forEach((feature) => {
+            const coordinates = feature.geometry?.coordinates;
+
+            if (!Array.isArray(coordinates) || coordinates.length < 2) {
+                return;
+            }
+
+            const anchor = map.project(coordinates);
+            const layerId = feature.layer?.id;
+
+            if (layerId === POINT_LAYER && pointContainsPin(cursor, anchor)) {
+                matches.push({
+                    feature,
+                    distance: distanceSquared(cursor, anchor),
+                    priority: 0
+                });
+                return;
+            }
+
+            if (layerId === CLUSTER_LAYER && pointContainsCluster(cursor, anchor)) {
+                matches.push({
+                    feature,
+                    distance: distanceSquared(cursor, anchor),
+                    priority: 1
+                });
+            }
+        });
+
+        matches.sort((a, b) => {
+            if (a.priority !== b.priority) {
+                return a.priority - b.priority;
+            }
+
+            return a.distance - b.distance;
+        });
+
+        return matches.map((match) => match.feature);
     }
 
     function buildIncidentPopup(feature) {
@@ -114,8 +180,6 @@
                 return;
             }
 
-            // Prefer an individual incident if a pin and cluster overlap inside
-            // the expanded hit box.
             const pointFeature = features.find((feature) => feature.layer?.id === POINT_LAYER);
 
             if (pointFeature) {
