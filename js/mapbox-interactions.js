@@ -3,96 +3,11 @@
     const CLUSTER_LAYER = "incident-clusters";
     const SOURCE_ID = "active-incidents";
 
-    // The original Leaflet pins rendered at 30x38 with the geographic point
-    // anchored at the bottom center. Match that visible footprint here instead
-    // of relying on Mapbox symbol collision boxes for hit testing.
-    const PIN_HALF_WIDTH = 16;
-    const PIN_HEIGHT = 40;
-    const PIN_BOTTOM_PADDING = 4;
-    const CLUSTER_RADIUS = 28;
-
     let installed = false;
+    let retryTimer = null;
 
     function getMap() {
         return window.map ?? null;
-    }
-
-    function getQueryableLayers(map) {
-        return [POINT_LAYER, CLUSTER_LAYER].filter((layerId) => map.getLayer(layerId));
-    }
-
-    function getVisibleInteractiveFeatures(map) {
-        const layers = getQueryableLayers(map);
-
-        if (!layers.length) {
-            return [];
-        }
-
-        return map.queryRenderedFeatures(undefined, { layers });
-    }
-
-    function distanceSquared(a, b) {
-        const dx = a.x - b.x;
-        const dy = a.y - b.y;
-        return (dx * dx) + (dy * dy);
-    }
-
-    function pointContainsPin(cursor, anchor) {
-        const dx = cursor.x - anchor.x;
-        const dy = cursor.y - anchor.y;
-
-        return (
-            Math.abs(dx) <= PIN_HALF_WIDTH &&
-            dy >= -PIN_HEIGHT &&
-            dy <= PIN_BOTTOM_PADDING
-        );
-    }
-
-    function pointContainsCluster(cursor, anchor) {
-        return distanceSquared(cursor, anchor) <= (CLUSTER_RADIUS * CLUSTER_RADIUS);
-    }
-
-    function hitTest(map, cursor) {
-        const features = getVisibleInteractiveFeatures(map);
-        const matches = [];
-
-        features.forEach((feature) => {
-            const coordinates = feature.geometry?.coordinates;
-
-            if (!Array.isArray(coordinates) || coordinates.length < 2) {
-                return;
-            }
-
-            const anchor = map.project(coordinates);
-            const layerId = feature.layer?.id;
-
-            if (layerId === POINT_LAYER && pointContainsPin(cursor, anchor)) {
-                matches.push({
-                    feature,
-                    distance: distanceSquared(cursor, anchor),
-                    priority: 0
-                });
-                return;
-            }
-
-            if (layerId === CLUSTER_LAYER && pointContainsCluster(cursor, anchor)) {
-                matches.push({
-                    feature,
-                    distance: distanceSquared(cursor, anchor),
-                    priority: 1
-                });
-            }
-        });
-
-        matches.sort((a, b) => {
-            if (a.priority !== b.priority) {
-                return a.priority - b.priority;
-            }
-
-            return a.distance - b.distance;
-        });
-
-        return matches.map((match) => match.feature);
     }
 
     function buildIncidentPopup(feature) {
@@ -118,6 +33,23 @@
         container.appendChild(element);
     }
 
+    function openIncidentPopup(map, feature) {
+        const coordinates = feature.geometry?.coordinates?.slice();
+
+        if (!Array.isArray(coordinates)) {
+            return;
+        }
+
+        new mapboxgl.Popup({
+            offset: [0, -34],
+            closeButton: true,
+            closeOnClick: true
+        })
+            .setLngLat(coordinates)
+            .setDOMContent(buildIncidentPopup(feature))
+            .addTo(map);
+    }
+
     async function expandCluster(map, feature) {
         const clusterId = feature.properties?.cluster_id;
         const source = map.getSource(SOURCE_ID);
@@ -138,23 +70,6 @@
         }
     }
 
-    function openIncidentPopup(map, feature) {
-        const coordinates = feature.geometry?.coordinates?.slice();
-
-        if (!Array.isArray(coordinates)) {
-            return;
-        }
-
-        new mapboxgl.Popup({
-            offset: [0, -34],
-            closeButton: true,
-            closeOnClick: true
-        })
-            .setLngLat(coordinates)
-            .setDOMContent(buildIncidentPopup(feature))
-            .addTo(map);
-    }
-
     function installInteractions() {
         const map = getMap();
 
@@ -162,35 +77,67 @@
             return;
         }
 
+        if (
+            typeof map.addInteraction !== "function" ||
+            !map.getLayer(POINT_LAYER) ||
+            !map.getLayer(CLUSTER_LAYER)
+        ) {
+            clearTimeout(retryTimer);
+            retryTimer = window.setTimeout(installInteractions, 100);
+            return;
+        }
+
         installed = true;
 
-        map.on("mousemove", (event) => {
-            const features = hitTest(map, event.point);
-            map.getCanvas().style.cursor = features.length ? "pointer" : "";
+        map.addInteraction("hc911-incident-click", {
+            type: "click",
+            target: { layerId: POINT_LAYER },
+            handler: ({ feature }) => {
+                if (feature) {
+                    openIncidentPopup(map, feature);
+                }
+            }
         });
 
-        map.on("mouseout", () => {
-            map.getCanvas().style.cursor = "";
+        map.addInteraction("hc911-incident-mouseenter", {
+            type: "mouseenter",
+            target: { layerId: POINT_LAYER },
+            handler: () => {
+                map.getCanvas().style.cursor = "pointer";
+            }
         });
 
-        map.on("click", (event) => {
-            const features = hitTest(map, event.point);
-
-            if (!features.length) {
-                return;
+        map.addInteraction("hc911-incident-mouseleave", {
+            type: "mouseleave",
+            target: { layerId: POINT_LAYER },
+            handler: () => {
+                map.getCanvas().style.cursor = "";
             }
+        });
 
-            const pointFeature = features.find((feature) => feature.layer?.id === POINT_LAYER);
-
-            if (pointFeature) {
-                openIncidentPopup(map, pointFeature);
-                return;
+        map.addInteraction("hc911-cluster-click", {
+            type: "click",
+            target: { layerId: CLUSTER_LAYER },
+            handler: ({ feature }) => {
+                if (feature) {
+                    void expandCluster(map, feature);
+                }
             }
+        });
 
-            const clusterFeature = features.find((feature) => feature.layer?.id === CLUSTER_LAYER);
+        map.addInteraction("hc911-cluster-mouseenter", {
+            type: "mouseenter",
+            target: { layerId: CLUSTER_LAYER },
+            handler: () => {
+                map.getCanvas().style.cursor = "pointer";
+            }
+        });
 
-            if (clusterFeature) {
-                void expandCluster(map, clusterFeature);
+        map.addInteraction("hc911-cluster-mouseleave", {
+            type: "mouseleave",
+            target: { layerId: CLUSTER_LAYER },
+            handler: () => {
+                map.getCanvas().style.cursor = "";
             }
         });
     }
@@ -199,16 +146,11 @@
         const map = getMap();
 
         if (!map) {
-            window.setTimeout(start, 50);
+            retryTimer = window.setTimeout(start, 50);
             return;
         }
 
-        if (map.loaded()) {
-            installInteractions();
-            return;
-        }
-
-        map.once("load", installInteractions);
+        installInteractions();
     }
 
     start();
